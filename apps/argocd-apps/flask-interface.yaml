@@ -3,6 +3,13 @@ kind: Application
 metadata:
   name: flask-interface
   namespace: argocd
+  annotations:
+    argocd-image-updater.argoproj.io/image-list: flask-ansible=drpowell23/flask-ansible
+    argocd-image-updater.argoproj.io/flask-ansible.update-strategy: semver
+    argocd-image-updater.argoproj.io/flask-ansible.allow-tags: regexp:^v1\.
+    argocd-image-updater.argoproj.io/write-back-method: git
+    argocd-image-updater.argoproj.io/git-branch: main
+    argocd-image-updater.argoproj.io/write-back-target: kustomization
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
