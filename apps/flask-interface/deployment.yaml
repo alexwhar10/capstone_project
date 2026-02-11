@@ -25,8 +25,8 @@ metadata:
   namespace: flask-interface
 type: Opaque
 stringData:
-  HASH_SECRET: "your-secure-hash-secret-here"  # Change in production
-  JWT_SECRET: "your-secure-jwt-secret-here"    # Change in production
+  HASH_SECRET: "dev-secret-change-me"  # Change in production
+  JWT_SECRET: "dev-secret-change-me"    # Change in production
 ---
 apiVersion: apps/v1
 kind: Deployment
