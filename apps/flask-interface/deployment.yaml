@@ -100,6 +100,15 @@ spec:
               key: JWT_SECRET
         - name: ANSIBLE_SSH_KEY_PATH
           value: "/secrets/ssh-private-key"
+        # MySQL connection
+        - name: MYSQL_HOST
+          value: "mysql.mysql.svc"
+        - name: MYSQL_USER
+          value: "appuser"
+        - name: MYSQL_PASSWORD
+          value: "apppassword"
+        - name: MYSQL_DATABASE
+          value: "testdb"
         volumeMounts:
         - name: ssh-key
           mountPath: /secrets

@@ -27,6 +27,13 @@ import json
 import logging
 import time
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, REGISTRY
+import mysql.connector
+
+# MySQL config
+MYSQL_HOST = os.getenv("MYSQL_HOST", "mysql.mysql.svc")
+MYSQL_USER = os.getenv("MYSQL_USER", "appuser")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "apppassword")
+MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "testdb")
 
 # Ansible control config
 
@@ -73,6 +80,60 @@ ANSIBLE_JOBS_RUNNING = Gauge(
 )
 
 
+# -----------------------
+# MySQL helpers
+# -----------------------
+
+def get_db():
+    """Return a new MySQL connection."""
+    return mysql.connector.connect(
+        host=MYSQL_HOST,
+        user=MYSQL_USER,
+        password=MYSQL_PASSWORD,
+        database=MYSQL_DATABASE,
+    )
+
+
+def init_db():
+    """Create the job_history table if it doesn't exist."""
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS job_history (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                playbook VARCHAR(255) NOT NULL,
+                status VARCHAR(50) NOT NULL,
+                username VARCHAR(100) NOT NULL,
+                duration_seconds FLOAT NOT NULL,
+                rc INT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+        cursor.close()
+        conn.close()
+        logging.info("MySQL job_history table ready")
+    except Exception as e:
+        logging.error(f"Failed to initialize MySQL: {e}")
+
+
+def save_job(playbook, status, username, duration, rc):
+    """Insert a job record into MySQL."""
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO job_history (playbook, status, username, duration_seconds, rc) VALUES (%s, %s, %s, %s, %s)",
+            (playbook, status, username, duration, rc),
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logging.error(f"Failed to save job to MySQL: {e}")
+
+
 # API key hashing
 def hash_key(api_key: str) -> str:
     """
@@ -111,10 +172,12 @@ def run_remote_ansible_playbook(
 
     if not ANSIBLE_CONTROL_NODE_HOST:
         logging.error("ANSIBLE_CONTROL_NODE_HOST not configured")
+        duration = time.time() - start_time
         ANSIBLE_JOBS_RUNNING.dec()
         ANSIBLE_JOBS_TOTAL.labels(
             playbook=playbook_name, status="failed", user=user
         ).inc()
+        save_job(playbook_name, "failed", user, duration, 1)
         return {
             "status": "failed",
             "rc": 1,
@@ -175,6 +238,7 @@ def run_remote_ansible_playbook(
         ANSIBLE_JOBS_TOTAL.labels(
             playbook=playbook_name, status=status, user=user
         ).inc()
+        save_job(playbook_name, status, user, duration, result.returncode)
 
         return {
             "status": status,
@@ -192,6 +256,7 @@ def run_remote_ansible_playbook(
         ANSIBLE_JOBS_TOTAL.labels(
             playbook=playbook_name, status="failed", user=user
         ).inc()
+        save_job(playbook_name, "failed", user, duration, -1)
 
         return {
             "status": "failed",
@@ -210,6 +275,7 @@ def run_remote_ansible_playbook(
         ANSIBLE_JOBS_TOTAL.labels(
             playbook=playbook_name, status="failed", user=user
         ).inc()
+        save_job(playbook_name, "failed", user, duration, -1)
 
         return {
             "status": "failed",
@@ -381,6 +447,7 @@ def load_data():
 
 
 load_data()
+init_db()
 
 
 @app.route("/")
@@ -645,34 +712,41 @@ def metrics_summary():
     Get a summary of Ansible job metrics for the dashboard.
     Returns JSON with metric values.
     """
-    # Get current running jobs
+    # Running jobs is inherently in-memory state
     running_jobs = ANSIBLE_JOBS_RUNNING._value._value
 
-    # Get total jobs by collecting samples
-    total_jobs = {}
-    for sample in ANSIBLE_JOBS_TOTAL.collect()[0].samples:
-        # Skip the "_created" timestamp samples, only process "_total" count samples
-        if "_created" in sample.name or not sample.name.endswith("_total"):
-            continue
+    total_jobs = []
+    duration_stats = []
 
-        playbook = sample.labels.get("playbook", "unknown")
-        status = sample.labels.get("status", "unknown")
-        user = sample.labels.get("user", "unknown")
-        count = sample.value
+    try:
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
 
-        key = f"{playbook}_{status}_{user}"
-        total_jobs[key] = {
-            "playbook": playbook,
-            "status": status,
-            "user": user,
-            "count": int(count),
-        }
+        # Job history grouped by playbook, status, user
+        cursor.execute(
+            "SELECT playbook, status, username AS user, COUNT(*) AS count "
+            "FROM job_history GROUP BY playbook, status, username"
+        )
+        total_jobs = cursor.fetchall()
+
+        # Average duration per playbook
+        cursor.execute(
+            "SELECT playbook, ROUND(AVG(duration_seconds), 2) AS avg_seconds, "
+            "COUNT(*) AS total_runs FROM job_history GROUP BY playbook"
+        )
+        duration_stats = cursor.fetchall()
+
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        logging.error(f"Failed to query MySQL for metrics: {e}")
 
     return make_response(
         jsonify(
             {
                 "running_jobs": running_jobs,
-                "total_jobs": list(total_jobs.values()),
+                "total_jobs": total_jobs,
+                "duration_stats": duration_stats,
             }
         )
     )

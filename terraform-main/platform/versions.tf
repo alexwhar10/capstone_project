@@ -2,7 +2,7 @@ terraform {
   required_version = ">= 1.6.0"
 
   backend "s3" {
-    bucket  = "capstone-projectadnwpj"
+    bucket  = "capstone-projectadnwpj2"
     key     = "state/platform/terraform.tfstate"
     region  = "us-east-1"
     encrypt = true

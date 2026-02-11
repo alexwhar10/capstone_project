@@ -27,6 +27,12 @@
             <div class="stat-value" id="total-jobs-count">0</div>
             <p style="opacity: 0.9;">All Time</p>
         </div>
+
+        <div class="stat-card" style="background: linear-gradient(135deg, #f59e0b, #d97706);">
+            <h3>Avg Duration</h3>
+            <div class="stat-value" id="avg-duration">0s</div>
+            <p style="opacity: 0.9;">Per Job</p>
+        </div>
     </div>
 
     <h3 style="margin-top: 2rem;">📋 Job History</h3>
@@ -41,6 +47,20 @@
         </thead>
         <tbody id="job-history">
             <tr><td colspan="4" style="text-align: center; color: var(--text-secondary);">Loading metrics...</td></tr>
+        </tbody>
+    </table>
+
+    <h3 style="margin-top: 2rem;">⏱️ Average Duration by Playbook</h3>
+    <table>
+        <thead>
+            <tr>
+                <th>Playbook</th>
+                <th>Avg Duration</th>
+                <th>Total Runs</th>
+            </tr>
+        </thead>
+        <tbody id="duration-stats">
+            <tr><td colspan="3" style="text-align: center; color: var(--text-secondary);">Loading...</td></tr>
         </tbody>
     </table>
 </div>
@@ -71,6 +91,25 @@ function updateMetrics() {
                         <td><strong>${job.count}</strong></td>
                     </tr>
                 `).join('');
+            }
+
+            // Update average duration stats
+            const durationTbody = document.getElementById('duration-stats');
+            if (data.duration_stats && data.duration_stats.length > 0) {
+                const overallAvg = data.duration_stats.reduce((sum, d) => sum + d.avg_seconds * d.total_runs, 0)
+                    / Math.max(data.duration_stats.reduce((sum, d) => sum + d.total_runs, 0), 1);
+                document.getElementById('avg-duration').textContent = overallAvg.toFixed(1) + 's';
+
+                durationTbody.innerHTML = data.duration_stats.map(d => `
+                    <tr>
+                        <td><strong>${d.playbook}</strong></td>
+                        <td>${d.avg_seconds}s</td>
+                        <td><strong>${d.total_runs}</strong></td>
+                    </tr>
+                `).join('');
+            } else {
+                document.getElementById('avg-duration').textContent = '0s';
+                durationTbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--text-secondary);">No duration data yet</td></tr>';
             }
         })
         .catch(error => {
