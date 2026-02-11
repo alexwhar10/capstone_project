@@ -3,17 +3,8 @@ kind: Namespace
 metadata:
   name: flask-interface
 ---
-apiVersion: v1
-kind: Secret
-metadata:
-  name: ansible-ssh-key
-  namespace: flask-interface
-type: Opaque
-data:
-  # Base64 encoded SSH private key
-  # Generate with: cat ~/.ssh/id_rsa | base64 -w 0
-  # IMPORTANT: Replace this with your actual base64-encoded SSH key
-  ssh-private-key: <BASE64_ENCODED_SSH_KEY>
+# SSH key secret is created via kubectl, not committed to git
+# kubectl create secret generic ansible-ssh-key --from-file=ssh-private-key=$HOME/.ssh/id_rsa --namespace=flask-interface
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -60,7 +51,7 @@ spec:
     spec:
       containers:
       - name: flask-app
-        image: drpowell23/flask-ansible:latest  # Replace with your registry/image
+        image: drpowell23/flask-ansible
         imagePullPolicy: Always
         ports:
         - containerPort: 8000
