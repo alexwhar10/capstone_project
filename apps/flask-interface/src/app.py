@@ -423,7 +423,7 @@ def login():
 def dashboard():
     """Dashboard page - requires JWT authentication"""
     username = g.jwt_payload.get("username")
-    api_keys = user_db.get(username, {}).get("api_key", [])
+    # api_keys = user_db.get(username, {}).get("api_key", [])
     message = request.args.get("message")
 
     # wrap render_template in make_response so jwt_protected can set cookie
@@ -431,7 +431,7 @@ def dashboard():
         render_template(
             "dashboard.html",
             username=username,
-            api_keys=api_keys,
+            # api_keys=api_keys,
             message=message,
             allowed_playbooks=ALLOWED_PLAYBOOKS.keys(),  # pass playbooks for dashboard form
         )
@@ -474,55 +474,55 @@ def logout():
     return resp
 
 
-@app.route("/chpasswd", methods=["POST"])
-@jwt_protected
-def chpasswd():
-    """
-    Updates a user password
-    """
-
-    new_password = hash_key(request.form["password"])
-    current_user = g.jwt_payload.get("username")
-
-    user_db[current_user]["password"] = new_password
-    resp = make_response(redirect(url_for("dashboard", message="password updated")))
-    return resp
-
-
-@app.route("/api/newkey", methods=["POST"])
-@jwt_protected
-def api_new_key():
-    """
-    Updates a user password
-    """
-    api_key = secrets.token_urlsafe(32)
-    api_hash = hash_key(api_key)
-    current_user = g.jwt_payload.get("username")
-
-    user_db[current_user]["api_key"].append(api_hash)
-    resp = make_response(
-        redirect(url_for("dashboard", message=f"API Key Created {api_key}"))
-    )
-    return resp
+# @app.route("/chpasswd", methods=["POST"])
+# @jwt_protected
+# def chpasswd():
+#     """
+#     Updates a user password
+#     """
+#
+#     new_password = hash_key(request.form["password"])
+#     current_user = g.jwt_payload.get("username")
+#
+#     user_db[current_user]["password"] = new_password
+#     resp = make_response(redirect(url_for("dashboard", message="password updated")))
+#     return resp
 
 
-@app.route("/api/deletekey", methods=["POST"])
-@jwt_protected
-def api_delete_key():
-    """
-    Deletes an API key
-    """
-    key_hash = request.form.get("api_key")
-    current_user = g.jwt_payload.get("username")
+# @app.route("/api/newkey", methods=["POST"])
+# @jwt_protected
+# def api_new_key():
+#     """
+#     Updates a user password
+#     """
+#     api_key = secrets.token_urlsafe(32)
+#     api_hash = hash_key(api_key)
+#     current_user = g.jwt_payload.get("username")
+#
+#     user_db[current_user]["api_key"].append(api_hash)
+#     resp = make_response(
+#         redirect(url_for("dashboard", message=f"API Key Created {api_key}"))
+#     )
+#     return resp
 
-    if key_hash in user_db[current_user]["api_key"]:
-        user_db[current_user]["api_key"].remove(key_hash)
-        message = "API key deleted successfully"
-    else:
-        message = "API key not found"
 
-    resp = make_response(redirect(url_for("dashboard", message=message)))
-    return resp
+# @app.route("/api/deletekey", methods=["POST"])
+# @jwt_protected
+# def api_delete_key():
+#     """
+#     Deletes an API key
+#     """
+#     key_hash = request.form.get("api_key")
+#     current_user = g.jwt_payload.get("username")
+#
+#     if key_hash in user_db[current_user]["api_key"]:
+#         user_db[current_user]["api_key"].remove(key_hash)
+#         message = "API key deleted successfully"
+#     else:
+#         message = "API key not found"
+#
+#     resp = make_response(redirect(url_for("dashboard", message=message)))
+#     return resp
 
 
 @app.route("/<resource>", methods=["GET"])
