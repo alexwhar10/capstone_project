@@ -51,7 +51,7 @@ spec:
     spec:
       containers:
       - name: flask-app
-        image: drpowell23/flask-ansible
+        image: drpowell23/flask-ansible:v1.0.1
         imagePullPolicy: Always
         ports:
         - containerPort: 8000
