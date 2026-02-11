@@ -42,11 +42,12 @@
                 <th>Playbook</th>
                 <th>Status</th>
                 <th>User</th>
+                <th>Source</th>
                 <th>Count</th>
             </tr>
         </thead>
         <tbody id="job-history">
-            <tr><td colspan="4" style="text-align: center; color: var(--text-secondary);">Loading metrics...</td></tr>
+            <tr><td colspan="5" style="text-align: center; color: var(--text-secondary);">Loading metrics...</td></tr>
         </tbody>
     </table>
 
@@ -77,7 +78,7 @@ function updateMetrics() {
 
             const tbody = document.getElementById('job-history');
             if (data.total_jobs.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="4" style="text-align: center; color: var(--text-secondary);">No jobs run yet</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-secondary);">No jobs run yet</td></tr>';
             } else {
                 tbody.innerHTML = data.total_jobs.map(job => `
                     <tr>
@@ -88,6 +89,7 @@ function updateMetrics() {
                             </span>
                         </td>
                         <td>${job.user}</td>
+                        <td>${job.source || 'manual'}</td>
                         <td><strong>${job.count}</strong></td>
                     </tr>
                 `).join('');
@@ -120,6 +122,132 @@ function updateMetrics() {
 updateMetrics();
 setInterval(updateMetrics, 5000);
 </script>
+
+<!-- Scheduled Jobs Section (admin only) -->
+{% if role == 'admin' %}
+<div class="card">
+    <h2>📅 Scheduled Jobs</h2>
+
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Playbook</th>
+                <th>Cron Schedule</th>
+                <th>Status</th>
+                <th>Created By</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody id="schedules-table">
+            <tr><td colspan="6" style="text-align: center; color: var(--text-secondary);">Loading...</td></tr>
+        </tbody>
+    </table>
+
+    <h3 style="margin-top: 1.5rem;">Create New Schedule</h3>
+    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem;">
+        <div>
+            <label for="sched-name">Name</label>
+            <input type="text" id="sched-name" placeholder="nightly-ping">
+        </div>
+        <div>
+            <label for="sched-playbook">Playbook</label>
+            <select id="sched-playbook">
+                {% for pb in allowed_playbooks %}
+                <option value="{{ pb }}">{{ pb }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div>
+            <label for="sched-cron">Cron Expression</label>
+            <input type="text" id="sched-cron" placeholder="0 3 * * *">
+        </div>
+    </div>
+    <div style="margin-top: 0.5rem;">
+        <label for="sched-vars">Extra Variables (JSON)</label>
+        <input type="text" id="sched-vars" placeholder='{}'>
+    </div>
+    <button class="btn btn-primary" onclick="createSchedule()" style="margin-top: 0.5rem;">+ Create Schedule</button>
+    <p style="margin-top: 0.5rem; color: var(--text-secondary); font-size: 0.85rem;">
+        Cron format: minute hour day month weekday &mdash; e.g. <code>0 3 * * *</code> = daily at 3:00 AM,
+        <code>0 12 * * 1</code> = every Monday at noon
+    </p>
+</div>
+
+<script>
+function loadSchedules() {
+    fetch('/api/schedules')
+        .then(r => r.json())
+        .then(schedules => {
+            const tbody = document.getElementById('schedules-table');
+            if (!schedules.length) {
+                tbody.innerHTML = '<tr><td colspan="6" style="text-align:center; color:var(--text-secondary);">No scheduled jobs</td></tr>';
+                return;
+            }
+            tbody.innerHTML = schedules.map(s => `
+                <tr>
+                    <td><strong>${s.name}</strong></td>
+                    <td>${s.playbook}</td>
+                    <td><code>${s.cron_expression}</code></td>
+                    <td>
+                        <span class="badge ${s.enabled ? 'badge-success' : 'badge-danger'}"
+                              style="cursor:pointer"
+                              onclick="toggleSchedule(${s.id}, ${!s.enabled})">
+                            ${s.enabled ? 'Enabled' : 'Disabled'}
+                        </span>
+                    </td>
+                    <td>${s.created_by}</td>
+                    <td>
+                        <button class="btn btn-danger" style="padding:0.3rem 0.6rem; font-size:0.8rem;"
+                                onclick="deleteSchedule(${s.id})">Delete</button>
+                    </td>
+                </tr>
+            `).join('');
+        })
+        .catch(err => console.error('Error loading schedules:', err));
+}
+
+function createSchedule() {
+    const body = {
+        name: document.getElementById('sched-name').value,
+        playbook: document.getElementById('sched-playbook').value,
+        cron_expression: document.getElementById('sched-cron').value,
+        extra_vars: document.getElementById('sched-vars').value || '{}',
+    };
+    fetch('/api/schedules', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body),
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.error) { alert(data.error); return; }
+        document.getElementById('sched-name').value = '';
+        document.getElementById('sched-cron').value = '';
+        document.getElementById('sched-vars').value = '';
+        loadSchedules();
+    })
+    .catch(err => alert('Error: ' + err));
+}
+
+function toggleSchedule(id, enabled) {
+    fetch(`/api/schedules/${id}`, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({enabled}),
+    }).then(() => loadSchedules());
+}
+
+function deleteSchedule(id) {
+    if (!confirm('Delete this schedule?')) return;
+    fetch(`/api/schedules/${id}`, {method: 'DELETE'})
+        .then(() => loadSchedules());
+}
+
+loadSchedules();
+setInterval(loadSchedules, 15000);
+</script>
+{% endif %}
 
 <!-- Run Playbook Section -->
 <div class="card">

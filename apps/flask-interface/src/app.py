@@ -28,6 +28,8 @@ import logging
 import time
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, REGISTRY
 import mysql.connector
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 # MySQL config
 MYSQL_HOST = os.getenv("MYSQL_HOST", "mysql.mysql.svc")
@@ -95,7 +97,7 @@ def get_db():
 
 
 def init_db():
-    """Create the job_history table if it doesn't exist."""
+    """Create the job_history and scheduled_jobs tables if they don't exist."""
     try:
         conn = get_db()
         cursor = conn.cursor()
@@ -110,22 +112,50 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # Add source column if missing (idempotent)
+        cursor.execute("""
+            SELECT COUNT(*) FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'job_history'
+            AND COLUMN_NAME = 'source'
+        """, (MYSQL_DATABASE,))
+        if cursor.fetchone()[0] == 0:
+            cursor.execute("""
+                ALTER TABLE job_history
+                ADD COLUMN source VARCHAR(50) DEFAULT 'manual'
+            """)
+
+        # Scheduled jobs table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS scheduled_jobs (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(255) NOT NULL UNIQUE,
+                playbook VARCHAR(255) NOT NULL,
+                extra_vars TEXT DEFAULT '{}',
+                cron_expression VARCHAR(100) NOT NULL,
+                enabled TINYINT(1) DEFAULT 1,
+                created_by VARCHAR(100) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            )
+        """)
+
         conn.commit()
         cursor.close()
         conn.close()
-        logging.info("MySQL job_history table ready")
+        logging.info("MySQL tables ready (job_history, scheduled_jobs)")
     except Exception as e:
         logging.error(f"Failed to initialize MySQL: {e}")
 
 
-def save_job(playbook, status, username, duration, rc):
+def save_job(playbook, status, username, duration, rc, source="manual"):
     """Insert a job record into MySQL."""
     try:
         conn = get_db()
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO job_history (playbook, status, username, duration_seconds, rc) VALUES (%s, %s, %s, %s, %s)",
-            (playbook, status, username, duration, rc),
+            "INSERT INTO job_history (playbook, status, username, duration_seconds, rc, source) VALUES (%s, %s, %s, %s, %s, %s)",
+            (playbook, status, username, duration, rc, source),
         )
         conn.commit()
         cursor.close()
@@ -160,7 +190,7 @@ def keys_match(api_key: str, stored_hash: str) -> bool:
 
 
 def run_remote_ansible_playbook(
-    playbook_name: str, extra_vars: dict = None, user: str = "unknown"
+    playbook_name: str, extra_vars: dict = None, user: str = "unknown", source: str = "manual"
 ) -> dict:
     """
     Execute an Ansible playbook on the remote Ansible control node via SSH.
@@ -177,7 +207,7 @@ def run_remote_ansible_playbook(
         ANSIBLE_JOBS_TOTAL.labels(
             playbook=playbook_name, status="failed", user=user
         ).inc()
-        save_job(playbook_name, "failed", user, duration, 1)
+        save_job(playbook_name, "failed", user, duration, 1, source)
         return {
             "status": "failed",
             "rc": 1,
@@ -238,7 +268,7 @@ def run_remote_ansible_playbook(
         ANSIBLE_JOBS_TOTAL.labels(
             playbook=playbook_name, status=status, user=user
         ).inc()
-        save_job(playbook_name, status, user, duration, result.returncode)
+        save_job(playbook_name, status, user, duration, result.returncode, source)
 
         return {
             "status": status,
@@ -256,7 +286,7 @@ def run_remote_ansible_playbook(
         ANSIBLE_JOBS_TOTAL.labels(
             playbook=playbook_name, status="failed", user=user
         ).inc()
-        save_job(playbook_name, "failed", user, duration, -1)
+        save_job(playbook_name, "failed", user, duration, -1, source)
 
         return {
             "status": "failed",
@@ -275,7 +305,7 @@ def run_remote_ansible_playbook(
         ANSIBLE_JOBS_TOTAL.labels(
             playbook=playbook_name, status="failed", user=user
         ).inc()
-        save_job(playbook_name, "failed", user, duration, -1)
+        save_job(playbook_name, "failed", user, duration, -1, source)
 
         return {
             "status": "failed",
@@ -358,6 +388,18 @@ def not_found(e):
     ), 404
 
 
+@app.errorhandler(403)
+def forbidden(e):
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "Forbidden - admin access required"}), 403
+    return render_template(
+        "error.html",
+        error_code=403,
+        error_title="Forbidden",
+        error_message="You do not have permission to access this page",
+    ), 403
+
+
 @app.errorhandler(500)
 def internal_error(e):
     return render_template(
@@ -366,6 +408,16 @@ def internal_error(e):
         error_title="Internal Server Error",
         error_message="Something went wrong on our end",
     ), 500
+
+
+def admin_required(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        username = g.jwt_payload.get("username")
+        if user_db.get(username, {}).get("role") != "admin":
+            abort(403)
+        return func(*args, **kwargs)
+    return wrapper
 
 
 def api_protected(func):
@@ -449,6 +501,59 @@ def load_data():
 load_data()
 init_db()
 
+# -----------------------
+# APScheduler setup
+# -----------------------
+
+scheduler = BackgroundScheduler(daemon=True)
+
+
+def execute_scheduled_job(job_name, playbook_key, extra_vars_json):
+    """Called by APScheduler when a cron trigger fires."""
+    logging.info(f"Scheduled job '{job_name}' firing for playbook '{playbook_key}'")
+    if playbook_key not in ALLOWED_PLAYBOOKS:
+        logging.error(f"Scheduled job '{job_name}': playbook '{playbook_key}' not allowed")
+        return
+    playbook_file = ALLOWED_PLAYBOOKS[playbook_key]
+    try:
+        extra_vars = json.loads(extra_vars_json) if extra_vars_json else {}
+    except Exception:
+        extra_vars = {}
+    run_remote_ansible_playbook(
+        playbook_file, extra_vars, user=f"scheduled:{job_name}", source="scheduled"
+    )
+
+
+def load_schedules_from_db():
+    """Load all enabled scheduled_jobs from MySQL and register them with APScheduler."""
+    try:
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT * FROM scheduled_jobs WHERE enabled = 1")
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        for row in rows:
+            job_id = f"scheduled_{row['id']}"
+            try:
+                trigger = CronTrigger.from_crontab(row['cron_expression'])
+                scheduler.add_job(
+                    execute_scheduled_job,
+                    trigger=trigger,
+                    id=job_id,
+                    replace_existing=True,
+                    args=[row['name'], row['playbook'], row['extra_vars']],
+                )
+                logging.info(f"Loaded schedule: {row['name']} ({row['cron_expression']})")
+            except Exception as e:
+                logging.error(f"Failed to load schedule '{row['name']}': {e}")
+    except Exception as e:
+        logging.error(f"Failed to load schedules from DB: {e}")
+
+
+scheduler.start()
+load_schedules_from_db()
+
 
 @app.route("/")
 def index():
@@ -494,13 +599,14 @@ def dashboard():
     message = request.args.get("message")
 
     # wrap render_template in make_response so jwt_protected can set cookie
+    role = user_db.get(username, {}).get("role", "user")
     return make_response(
         render_template(
             "dashboard.html",
             username=username,
-            # api_keys=api_keys,
+            role=role,
             message=message,
-            allowed_playbooks=ALLOWED_PLAYBOOKS.keys(),  # pass playbooks for dashboard form
+            allowed_playbooks=ALLOWED_PLAYBOOKS.keys(),
         )
     )
 
@@ -539,6 +645,164 @@ def logout():
     resp = make_response(redirect(url_for("index")))
     resp.set_cookie("jwt", "", expires=0)
     return resp
+
+
+# -----------------------
+# Schedule CRUD routes
+# -----------------------
+
+
+@app.route("/api/schedules", methods=["GET"])
+@jwt_protected
+def list_schedules():
+    """Return all scheduled jobs as JSON."""
+    try:
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            "SELECT id, name, playbook, cron_expression, extra_vars, enabled, "
+            "created_by, created_at FROM scheduled_jobs ORDER BY created_at DESC"
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        for row in rows:
+            row['created_at'] = row['created_at'].isoformat() if row['created_at'] else None
+        return make_response(jsonify(rows))
+    except Exception as e:
+        logging.error(f"Failed to list schedules: {e}")
+        return make_response(jsonify({"error": str(e)}), 500)
+
+
+@app.route("/api/schedules", methods=["POST"])
+@jwt_protected
+@admin_required
+def create_schedule():
+    """Create a new scheduled job (admin only)."""
+    body = request.json or {}
+    name = body.get("name", "").strip()
+    playbook = body.get("playbook", "").strip()
+    cron_expr = body.get("cron_expression", "").strip()
+    extra_vars = body.get("extra_vars", "{}")
+    username = g.jwt_payload.get("username")
+
+    if not name or not playbook or not cron_expr:
+        return jsonify({"error": "name, playbook, and cron_expression are required"}), 400
+    if playbook not in ALLOWED_PLAYBOOKS:
+        return jsonify({"error": f"Playbook '{playbook}' not allowed"}), 400
+
+    try:
+        trigger = CronTrigger.from_crontab(cron_expr)
+    except Exception as e:
+        return jsonify({"error": f"Invalid cron expression: {e}"}), 400
+
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO scheduled_jobs (name, playbook, extra_vars, cron_expression, created_by) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (name, playbook, extra_vars, cron_expr, username),
+        )
+        job_db_id = cursor.lastrowid
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        scheduler.add_job(
+            execute_scheduled_job, trigger=trigger,
+            id=f"scheduled_{job_db_id}", replace_existing=True,
+            args=[name, playbook, extra_vars],
+        )
+        return jsonify({"id": job_db_id, "message": "Schedule created"}), 201
+    except mysql.connector.IntegrityError:
+        return jsonify({"error": f"Schedule name '{name}' already exists"}), 409
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/schedules/<int:schedule_id>", methods=["PUT"])
+@jwt_protected
+@admin_required
+def update_schedule(schedule_id):
+    """Update a scheduled job (admin only)."""
+    body = request.json or {}
+    cron_expr = body.get("cron_expression", "").strip() if body.get("cron_expression") else ""
+    enabled = body.get("enabled")
+    extra_vars = body.get("extra_vars")
+
+    updates = []
+    params = []
+    if cron_expr:
+        try:
+            CronTrigger.from_crontab(cron_expr)
+        except Exception as e:
+            return jsonify({"error": f"Invalid cron expression: {e}"}), 400
+        updates.append("cron_expression = %s")
+        params.append(cron_expr)
+    if enabled is not None:
+        updates.append("enabled = %s")
+        params.append(1 if enabled else 0)
+    if extra_vars is not None:
+        updates.append("extra_vars = %s")
+        params.append(extra_vars)
+
+    if not updates:
+        return jsonify({"error": "Nothing to update"}), 400
+
+    params.append(schedule_id)
+    try:
+        conn = get_db()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(f"UPDATE scheduled_jobs SET {', '.join(updates)} WHERE id = %s", params)
+        conn.commit()
+
+        # Reload this job in scheduler
+        cursor.execute("SELECT * FROM scheduled_jobs WHERE id = %s", (schedule_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+
+        job_id = f"scheduled_{schedule_id}"
+        if row and row['enabled']:
+            trigger = CronTrigger.from_crontab(row['cron_expression'])
+            scheduler.add_job(
+                execute_scheduled_job, trigger=trigger,
+                id=job_id, replace_existing=True,
+                args=[row['name'], row['playbook'], row['extra_vars']],
+            )
+        else:
+            try:
+                scheduler.remove_job(job_id)
+            except Exception:
+                pass
+
+        return jsonify({"message": "Schedule updated"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/schedules/<int:schedule_id>", methods=["DELETE"])
+@jwt_protected
+@admin_required
+def delete_schedule(schedule_id):
+    """Delete a scheduled job (admin only)."""
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM scheduled_jobs WHERE id = %s", (schedule_id,))
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        try:
+            scheduler.remove_job(f"scheduled_{schedule_id}")
+        except Exception:
+            pass
+
+        return jsonify({"message": "Schedule deleted"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # @app.route("/chpasswd", methods=["POST"])
@@ -722,10 +986,10 @@ def metrics_summary():
         conn = get_db()
         cursor = conn.cursor(dictionary=True)
 
-        # Job history grouped by playbook, status, user
+        # Job history grouped by playbook, status, user, source
         cursor.execute(
-            "SELECT playbook, status, username AS user, COUNT(*) AS count "
-            "FROM job_history GROUP BY playbook, status, username"
+            "SELECT playbook, status, username AS user, COALESCE(source, 'manual') AS source, COUNT(*) AS count "
+            "FROM job_history GROUP BY playbook, status, username, source"
         )
         total_jobs = cursor.fetchall()
 
