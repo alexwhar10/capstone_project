@@ -67,6 +67,25 @@
 </div>
 
 <script>
+async function safeFetch(url, options) {
+    const r = await fetch(url, options);
+    const contentType = r.headers.get('content-type');
+    
+    // Check if response is JSON
+    if (contentType && contentType.includes('application/json')) {
+        const data = await r.json();
+        if (!r.ok) {
+            // Throw JSON error message if available
+            throw new Error(data.error || `HTTP ${r.status}: ${JSON.stringify(data)}`);
+        }
+        return data;
+    } else {
+        // Non-JSON response (likely HTML error page)
+        const text = await r.text();
+        throw new Error(`HTTP ${r.status}: ${text.substring(0, 200)}`);
+    }
+}
+
 function updateMetrics() {
     safeFetch('/api/metrics/summary')
         .then(data => {
@@ -177,25 +196,6 @@ setInterval(updateMetrics, 5000);
 </div>
 
 <script>
-async function safeFetch(url, options) {
-    const r = await fetch(url, options);
-    const contentType = r.headers.get('content-type');
-    
-    // Check if response is JSON
-    if (contentType && contentType.includes('application/json')) {
-        const data = await r.json();
-        if (!r.ok) {
-            // Throw JSON error message if available
-            throw new Error(data.error || `HTTP ${r.status}: ${JSON.stringify(data)}`);
-        }
-        return data;
-    } else {
-        // Non-JSON response (likely HTML error page)
-        const text = await r.text();
-        throw new Error(`HTTP ${r.status}: ${text.substring(0, 200)}`);
-    }
-}
-
 function loadSchedules() {
     safeFetch('/api/schedules')
         .then(schedules => {
