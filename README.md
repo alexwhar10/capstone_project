@@ -7,3 +7,4 @@
 6. Run a plan to verify that argo cd will be deployed
 7. Run apply
 8. Output should read the DNS to access argo cd
+https://a33fd77dab8fc4a1a95b50a7c65d06fe-1517461874.us-east-1.elb.amazonaws.com
