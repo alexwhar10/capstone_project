@@ -1032,44 +1032,57 @@ def metrics_summary():
     Get a summary of Ansible job metrics for the dashboard.
     Returns JSON with metric values.
     """
-    # Running jobs is inherently in-memory state
-    running_jobs = ANSIBLE_JOBS_RUNNING._value._value
-
-    total_jobs = []
-    duration_stats = []
-
     try:
-        conn = get_db()
-        cursor = conn.cursor(dictionary=True)
+        # Running jobs is inherently in-memory state
+        running_jobs = ANSIBLE_JOBS_RUNNING._value._value
 
-        # Job history grouped by playbook, status, user, source
-        cursor.execute(
-            "SELECT playbook, status, username AS user, COALESCE(source, 'manual') AS source, COUNT(*) AS count "
-            "FROM job_history GROUP BY playbook, status, username, source"
-        )
-        total_jobs = cursor.fetchall()
+        total_jobs = []
+        duration_stats = []
 
-        # Average duration per playbook
-        cursor.execute(
-            "SELECT playbook, ROUND(AVG(duration_seconds), 2) AS avg_seconds, "
-            "COUNT(*) AS total_runs FROM job_history GROUP BY playbook"
-        )
-        duration_stats = cursor.fetchall()
+        try:
+            conn = get_db()
+            cursor = conn.cursor(dictionary=True)
 
-        cursor.close()
-        conn.close()
-    except Exception as e:
-        logging.error(f"Failed to query MySQL for metrics: {e}")
+            # Job history grouped by playbook, status, user, source
+            cursor.execute(
+                "SELECT playbook, status, username AS user, COALESCE(source, 'manual') AS source, COUNT(*) AS count "
+                "FROM job_history GROUP BY playbook, status, username, source"
+            )
+            total_jobs = cursor.fetchall()
+            # Convert to int for JSON serialization
+            for job in total_jobs:
+                job["count"] = int(job["count"])
 
-    return make_response(
-        jsonify(
+            # Average duration per playbook
+            cursor.execute(
+                "SELECT playbook, ROUND(AVG(duration_seconds), 2) AS avg_seconds, "
+                "COUNT(*) AS total_runs FROM job_history GROUP BY playbook"
+            )
+            duration_stats = cursor.fetchall()
+            # Convert to proper types for JSON serialization
+            for stat in duration_stats:
+                stat["avg_seconds"] = (
+                    float(stat["avg_seconds"])
+                    if stat["avg_seconds"] is not None
+                    else 0.0
+                )
+                stat["total_runs"] = int(stat["total_runs"])
+
+            cursor.close()
+            conn.close()
+        except Exception as e:
+            logging.error(f"Failed to query MySQL for metrics: {e}")
+
+        return jsonify(
             {
                 "running_jobs": running_jobs,
                 "total_jobs": total_jobs,
                 "duration_stats": duration_stats,
             }
         )
-    )
+    except Exception as e:
+        logging.error(f"Error in metrics_summary: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":

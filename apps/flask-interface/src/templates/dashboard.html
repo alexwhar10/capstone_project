@@ -115,6 +115,9 @@ function updateMetrics() {
         })
         .catch(error => {
             console.error('Error fetching metrics:', error);
+            // Show error in UI
+            const tbody = document.getElementById('job-history');
+            tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #ef4444;">Error loading metrics: ' + error.message + '</td></tr>';
         });
 }
 
