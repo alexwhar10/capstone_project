@@ -36,3 +36,23 @@ prometheus:
       limits:
         cpu: 500m
         memory: 1Gi
+
+  serverFiles:
+    prometheus.yml:
+      scrape_configs:
+        # Blackbox exporter - ICMP probe
+        - job_name: 'blackbox-icmp'
+          metrics_path: /probe
+          params:
+            module: [icmp]
+          static_configs:
+            - targets:
+                - 67.217.62.83
+                - 34.236.145.212
+          relabel_configs:
+            - source_labels: [__address__]
+              target_label: __param_target
+            - source_labels: [__param_target]
+              target_label: instance
+            - target_label: __address__
+              replacement: prometheus-blackbox-exporter.monitoring.svc:9115
