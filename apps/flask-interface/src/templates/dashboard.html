@@ -68,8 +68,7 @@
 
 <script>
 function updateMetrics() {
-    fetch('/api/metrics/summary')
-        .then(response => response.json())
+    safeFetch('/api/metrics/summary')
         .then(data => {
             document.getElementById('running-jobs').textContent = data.running_jobs;
 
@@ -175,9 +174,27 @@ setInterval(updateMetrics, 5000);
 </div>
 
 <script>
+async function safeFetch(url, options) {
+    const r = await fetch(url, options);
+    const contentType = r.headers.get('content-type');
+    
+    // Check if response is JSON
+    if (contentType && contentType.includes('application/json')) {
+        const data = await r.json();
+        if (!r.ok) {
+            // Throw JSON error message if available
+            throw new Error(data.error || `HTTP ${r.status}: ${JSON.stringify(data)}`);
+        }
+        return data;
+    } else {
+        // Non-JSON response (likely HTML error page)
+        const text = await r.text();
+        throw new Error(`HTTP ${r.status}: ${text.substring(0, 200)}`);
+    }
+}
+
 function loadSchedules() {
-    fetch('/api/schedules')
-        .then(r => r.json())
+    safeFetch('/api/schedules')
         .then(schedules => {
             const tbody = document.getElementById('schedules-table');
             if (!schedules.length) {
@@ -214,12 +231,11 @@ function createSchedule() {
         cron_expression: document.getElementById('sched-cron').value,
         extra_vars: document.getElementById('sched-vars').value || '{}',
     };
-    fetch('/api/schedules', {
+    safeFetch('/api/schedules', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(body),
     })
-    .then(r => r.json())
     .then(data => {
         if (data.error) { alert(data.error); return; }
         document.getElementById('sched-name').value = '';
@@ -227,21 +243,23 @@ function createSchedule() {
         document.getElementById('sched-vars').value = '';
         loadSchedules();
     })
-    .catch(err => alert('Error: ' + err));
+    .catch(err => alert('Error: ' + err.message));
 }
 
 function toggleSchedule(id, enabled) {
-    fetch(`/api/schedules/${id}`, {
+    safeFetch(`/api/schedules/${id}`, {
         method: 'PUT',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({enabled}),
-    }).then(() => loadSchedules());
+    }).then(() => loadSchedules())
+      .catch(err => console.error('Toggle error:', err));
 }
 
 function deleteSchedule(id) {
     if (!confirm('Delete this schedule?')) return;
-    fetch(`/api/schedules/${id}`, {method: 'DELETE'})
-        .then(() => loadSchedules());
+    safeFetch(`/api/schedules/${id}`, {method: 'DELETE'})
+        .then(() => loadSchedules())
+        .catch(err => alert('Delete error: ' + err.message));
 }
 
 loadSchedules();

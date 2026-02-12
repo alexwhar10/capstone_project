@@ -86,6 +86,7 @@ ANSIBLE_JOBS_RUNNING = Gauge(
 # MySQL helpers
 # -----------------------
 
+
 def get_db():
     """Return a new MySQL connection."""
     return mysql.connector.connect(
@@ -114,11 +115,14 @@ def init_db():
         """)
 
         # Add source column if missing (idempotent)
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT COUNT(*) FROM information_schema.COLUMNS
             WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'job_history'
             AND COLUMN_NAME = 'source'
-        """, (MYSQL_DATABASE,))
+        """,
+            (MYSQL_DATABASE,),
+        )
         if cursor.fetchone()[0] == 0:
             cursor.execute("""
                 ALTER TABLE job_history
@@ -190,7 +194,10 @@ def keys_match(api_key: str, stored_hash: str) -> bool:
 
 
 def run_remote_ansible_playbook(
-    playbook_name: str, extra_vars: dict = None, user: str = "unknown", source: str = "manual"
+    playbook_name: str,
+    extra_vars: dict = None,
+    user: str = "unknown",
+    source: str = "manual",
 ) -> dict:
     """
     Execute an Ansible playbook on the remote Ansible control node via SSH.
@@ -359,7 +366,7 @@ def jwt_protected(func):
             abort(401, description="Token Expired")
         except jwt.InvalidTokenError:
             abort(401, description="Invalid Token")
-        response = func(*args, **kwargs)
+        response = make_response(func(*args, **kwargs))
         response.set_cookie("jwt", token, httponly=True, samesite="Lax")
         return response
 
@@ -380,6 +387,8 @@ def unauthorized(e):
 
 @app.errorhandler(404)
 def not_found(e):
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "Not Found"}), 404
     return render_template(
         "error.html",
         error_code=404,
@@ -402,6 +411,8 @@ def forbidden(e):
 
 @app.errorhandler(500)
 def internal_error(e):
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "Internal Server Error"}), 500
     return render_template(
         "error.html",
         error_code=500,
@@ -417,6 +428,7 @@ def admin_required(func):
         if user_db.get(username, {}).get("role") != "admin":
             abort(403)
         return func(*args, **kwargs)
+
     return wrapper
 
 
@@ -512,7 +524,9 @@ def execute_scheduled_job(job_name, playbook_key, extra_vars_json):
     """Called by APScheduler when a cron trigger fires."""
     logging.info(f"Scheduled job '{job_name}' firing for playbook '{playbook_key}'")
     if playbook_key not in ALLOWED_PLAYBOOKS:
-        logging.error(f"Scheduled job '{job_name}': playbook '{playbook_key}' not allowed")
+        logging.error(
+            f"Scheduled job '{job_name}': playbook '{playbook_key}' not allowed"
+        )
         return
     playbook_file = ALLOWED_PLAYBOOKS[playbook_key]
     try:
@@ -536,23 +550,26 @@ def load_schedules_from_db():
         for row in rows:
             job_id = f"scheduled_{row['id']}"
             try:
-                trigger = CronTrigger.from_crontab(row['cron_expression'])
+                trigger = CronTrigger.from_crontab(row["cron_expression"])
                 scheduler.add_job(
                     execute_scheduled_job,
                     trigger=trigger,
                     id=job_id,
                     replace_existing=True,
-                    args=[row['name'], row['playbook'], row['extra_vars']],
+                    args=[row["name"], row["playbook"], row["extra_vars"]],
                 )
-                logging.info(f"Loaded schedule: {row['name']} ({row['cron_expression']})")
+                logging.info(
+                    f"Loaded schedule: {row['name']} ({row['cron_expression']})"
+                )
             except Exception as e:
                 logging.error(f"Failed to load schedule '{row['name']}': {e}")
     except Exception as e:
         logging.error(f"Failed to load schedules from DB: {e}")
 
 
-scheduler.start()
-load_schedules_from_db()
+if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not app.debug:
+    scheduler.start()
+    load_schedules_from_db()
 
 
 @app.route("/")
@@ -667,7 +684,9 @@ def list_schedules():
         cursor.close()
         conn.close()
         for row in rows:
-            row['created_at'] = row['created_at'].isoformat() if row['created_at'] else None
+            row["created_at"] = (
+                row["created_at"].isoformat() if row["created_at"] else None
+            )
         return make_response(jsonify(rows))
     except Exception as e:
         logging.error(f"Failed to list schedules: {e}")
@@ -687,14 +706,18 @@ def create_schedule():
     username = g.jwt_payload.get("username")
 
     if not name or not playbook or not cron_expr:
-        return jsonify({"error": "name, playbook, and cron_expression are required"}), 400
+        return make_response(
+            jsonify({"error": "name, playbook, and cron_expression are required"}), 400
+        )
     if playbook not in ALLOWED_PLAYBOOKS:
-        return jsonify({"error": f"Playbook '{playbook}' not allowed"}), 400
+        return make_response(
+            jsonify({"error": f"Playbook '{playbook}' not allowed"}), 400
+        )
 
     try:
         trigger = CronTrigger.from_crontab(cron_expr)
     except Exception as e:
-        return jsonify({"error": f"Invalid cron expression: {e}"}), 400
+        return make_response(jsonify({"error": f"Invalid cron expression: {e}"}), 400)
 
     try:
         conn = get_db()
@@ -710,15 +733,21 @@ def create_schedule():
         conn.close()
 
         scheduler.add_job(
-            execute_scheduled_job, trigger=trigger,
-            id=f"scheduled_{job_db_id}", replace_existing=True,
+            execute_scheduled_job,
+            trigger=trigger,
+            id=f"scheduled_{job_db_id}",
+            replace_existing=True,
             args=[name, playbook, extra_vars],
         )
-        return jsonify({"id": job_db_id, "message": "Schedule created"}), 201
+        return make_response(
+            jsonify({"id": job_db_id, "message": "Schedule created"}), 201
+        )
     except mysql.connector.IntegrityError:
-        return jsonify({"error": f"Schedule name '{name}' already exists"}), 409
+        return make_response(
+            jsonify({"error": f"Schedule name '{name}' already exists"}), 409
+        )
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return make_response(jsonify({"error": str(e)}), 500)
 
 
 @app.route("/api/schedules/<int:schedule_id>", methods=["PUT"])
@@ -727,7 +756,9 @@ def create_schedule():
 def update_schedule(schedule_id):
     """Update a scheduled job (admin only)."""
     body = request.json or {}
-    cron_expr = body.get("cron_expression", "").strip() if body.get("cron_expression") else ""
+    cron_expr = (
+        body.get("cron_expression", "").strip() if body.get("cron_expression") else ""
+    )
     enabled = body.get("enabled")
     extra_vars = body.get("extra_vars")
 
@@ -737,7 +768,9 @@ def update_schedule(schedule_id):
         try:
             CronTrigger.from_crontab(cron_expr)
         except Exception as e:
-            return jsonify({"error": f"Invalid cron expression: {e}"}), 400
+            return make_response(
+                jsonify({"error": f"Invalid cron expression: {e}"}), 400
+            )
         updates.append("cron_expression = %s")
         params.append(cron_expr)
     if enabled is not None:
@@ -748,13 +781,15 @@ def update_schedule(schedule_id):
         params.append(extra_vars)
 
     if not updates:
-        return jsonify({"error": "Nothing to update"}), 400
+        return make_response(jsonify({"error": "Nothing to update"}), 400)
 
     params.append(schedule_id)
     try:
         conn = get_db()
         cursor = conn.cursor(dictionary=True)
-        cursor.execute(f"UPDATE scheduled_jobs SET {', '.join(updates)} WHERE id = %s", params)
+        cursor.execute(
+            f"UPDATE scheduled_jobs SET {', '.join(updates)} WHERE id = %s", params
+        )
         conn.commit()
 
         # Reload this job in scheduler
@@ -764,12 +799,14 @@ def update_schedule(schedule_id):
         conn.close()
 
         job_id = f"scheduled_{schedule_id}"
-        if row and row['enabled']:
-            trigger = CronTrigger.from_crontab(row['cron_expression'])
+        if row and row["enabled"]:
+            trigger = CronTrigger.from_crontab(row["cron_expression"])
             scheduler.add_job(
-                execute_scheduled_job, trigger=trigger,
-                id=job_id, replace_existing=True,
-                args=[row['name'], row['playbook'], row['extra_vars']],
+                execute_scheduled_job,
+                trigger=trigger,
+                id=job_id,
+                replace_existing=True,
+                args=[row["name"], row["playbook"], row["extra_vars"]],
             )
         else:
             try:
@@ -777,9 +814,9 @@ def update_schedule(schedule_id):
             except Exception:
                 pass
 
-        return jsonify({"message": "Schedule updated"})
+        return make_response(jsonify({"message": "Schedule updated"}))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return make_response(jsonify({"error": str(e)}), 500)
 
 
 @app.route("/api/schedules/<int:schedule_id>", methods=["DELETE"])
@@ -800,9 +837,9 @@ def delete_schedule(schedule_id):
         except Exception:
             pass
 
-        return jsonify({"message": "Schedule deleted"})
+        return make_response(jsonify({"message": "Schedule deleted"}))
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return make_response(jsonify({"error": str(e)}), 500)
 
 
 # @app.route("/chpasswd", methods=["POST"])
