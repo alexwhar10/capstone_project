@@ -99,57 +99,71 @@ def get_db():
 
 def init_db():
     """Create the job_history and scheduled_jobs tables if they don't exist."""
-    try:
-        conn = get_db()
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS job_history (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                playbook VARCHAR(255) NOT NULL,
-                status VARCHAR(50) NOT NULL,
-                username VARCHAR(100) NOT NULL,
-                duration_seconds FLOAT NOT NULL,
-                rc INT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+    max_retries = 10
+    retry_delay = 2  # seconds
 
-        # Add source column if missing (idempotent)
-        cursor.execute(
-            """
-            SELECT COUNT(*) FROM information_schema.COLUMNS
-            WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'job_history'
-            AND COLUMN_NAME = 'source'
-        """,
-            (MYSQL_DATABASE,),
-        )
-        if cursor.fetchone()[0] == 0:
+    for attempt in range(1, max_retries + 1):
+        try:
+            conn = get_db()
+            cursor = conn.cursor()
             cursor.execute("""
-                ALTER TABLE job_history
-                ADD COLUMN source VARCHAR(50) DEFAULT 'manual'
+                CREATE TABLE IF NOT EXISTS job_history (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    playbook VARCHAR(255) NOT NULL,
+                    status VARCHAR(50) NOT NULL,
+                    username VARCHAR(100) NOT NULL,
+                    duration_seconds FLOAT NOT NULL,
+                    rc INT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
             """)
 
-        # Scheduled jobs table
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS scheduled_jobs (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                name VARCHAR(255) NOT NULL UNIQUE,
-                playbook VARCHAR(255) NOT NULL,
-                extra_vars TEXT DEFAULT '{}',
-                cron_expression VARCHAR(100) NOT NULL,
-                enabled TINYINT(1) DEFAULT 1,
-                created_by VARCHAR(100) NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            # Add source column if missing (idempotent)
+            cursor.execute(
+                """
+                SELECT COUNT(*) FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'job_history'
+                AND COLUMN_NAME = 'source'
+            """,
+                (MYSQL_DATABASE,),
             )
-        """)
+            if cursor.fetchone()[0] == 0:
+                cursor.execute("""
+                    ALTER TABLE job_history
+                    ADD COLUMN source VARCHAR(50) DEFAULT 'manual'
+                """)
 
-        conn.commit()
-        cursor.close()
-        conn.close()
-        logging.info("MySQL tables ready (job_history, scheduled_jobs)")
-    except Exception as e:
-        logging.error(f"Failed to initialize MySQL: {e}")
+            # Scheduled jobs table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS scheduled_jobs (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    name VARCHAR(255) NOT NULL UNIQUE,
+                    playbook VARCHAR(255) NOT NULL,
+                    extra_vars TEXT DEFAULT '{}',
+                    cron_expression VARCHAR(100) NOT NULL,
+                    enabled TINYINT(1) DEFAULT 1,
+                    created_by VARCHAR(100) NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                )
+            """)
+
+            conn.commit()
+            cursor.close()
+            conn.close()
+            logging.info("MySQL tables ready (job_history, scheduled_jobs)")
+            return  # Success!
+        except Exception as e:
+            if attempt < max_retries:
+                logging.warning(
+                    f"MySQL connection attempt {attempt}/{max_retries} failed: {e}. Retrying in {retry_delay}s..."
+                )
+                time.sleep(retry_delay)
+            else:
+                logging.error(
+                    f"Failed to initialize MySQL after {max_retries} attempts: {e}"
+                )
+                raise  # Re-raise on final attempt
 
 
 def save_job(playbook, status, username, duration, rc, source="manual"):
@@ -568,8 +582,12 @@ def load_schedules_from_db():
 
 
 if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not app.debug:
-    scheduler.start()
-    load_schedules_from_db()
+    try:
+        scheduler.start()
+        load_schedules_from_db()
+        logging.info("APScheduler started and schedules loaded")
+    except Exception as e:
+        logging.error(f"Failed to start scheduler or load schedules: {e}")
 
 
 @app.route("/")
